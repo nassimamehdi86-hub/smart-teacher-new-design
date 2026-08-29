@@ -1063,7 +1063,10 @@ async function renderTeacherDashboard(){
       <div class="tabpanel active" id="tab-exams">
         <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
           <h3 style="margin:0;">اختباراتي</h3>
-          <button class="btn btn-primary" id="newExam">+ اختبار جديد</button>
+          <div style="display:flex;gap:8px;">
+            <button class="btn btn-ghost" id="refreshExams" title="تحديث اللائحة" style="padding:10px 14px;">🔄</button>
+            <button class="btn btn-primary" id="newExam">+ اختبار جديد</button>
+          </div>
         </div>
         <p class="muted" style="margin-top:10px;">جميع اختباراتك تظهر هنا. اضغط على أي اختبار لمعاينته أو الحصول على رابط مشاركته أو حذفه.</p>
         <div class="row" style="margin-top:10px;">
@@ -1090,6 +1093,7 @@ async function renderTeacherDashboard(){
     </div>
   `;
   document.getElementById('newExam').onclick = ()=> go('teacherCreate', {draft:newDraft()});
+  document.getElementById('refreshExams').onclick = ()=> loadAllExams();
 
   const tabBtns = document.querySelectorAll('.tabbtn');
   tabBtns.forEach(btn=>{
@@ -1194,11 +1198,13 @@ async function renderTeacherDashboard(){
   // تبويبة "نتائج تلاميذي": تعرض حصريًا الاختبارات التي لها إجابة واحدة على الأقل
   function renderArchiveList(subjVal, levelVal){
     if(!examsLoaded){ listBox.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>'; return; }
-    const withSubs = allExams.filter(ex=>ex.submissionsCount>0);
+    // نبقي أيضًا الاختبارات اللي تعذّر التحقق من إجاباتها (submissionsLoadFailed) ظاهرة هنا
+    // بدل ما تختفي بصمت — قد يكون عندها إجابات فعلية ما قدرناش نأكدوها بسبب خطأ شبكة عابر.
+    const withSubs = allExams.filter(ex=>ex.submissionsCount>0 || ex.submissionsLoadFailed);
     const {filtered, levelGroups, levelNames} = groupExamsFor(withSubs, subjVal, levelVal);
     if(withSubs.length===0){ subPanel.innerHTML=''; listBox.innerHTML = '<p class="muted">لا توجد اختبارات أنجزها تلاميذ بعد.</p>'; return; }
     if(filtered.length===0){ subPanel.innerHTML=''; listBox.innerHTML = '<p class="muted">لا توجد نتائج مطابقة لبحثك.</p>'; return; }
-    listBox.innerHTML = renderExamGroupsHTML(levelGroups, levelNames, ex => ` — 👥 ${ex.submissionsCount} تلميذ`);
+    listBox.innerHTML = renderExamGroupsHTML(levelGroups, levelNames, ex => ex.submissionsLoadFailed ? ' — ⚠️ تعذر التحقق من الإجابات، اضغط لإعادة المحاولة' : ` — 👥 ${ex.submissionsCount} تلميذ`);
     listBox.querySelectorAll('[data-topic]').forEach(rowEl=>{
       rowEl.onclick = (e)=>{
         if(e.target.closest('[data-manage]')) return;
@@ -1216,6 +1222,28 @@ async function renderTeacherDashboard(){
   // يعرض لائحة التلاميذ الذين أجابوا على موضوع معيّن، مع نقطهم وأزرار فتح/تنزيل تصحيحهم PDF
   // الإجابات محمّلة مسبقًا مع باقي البيانات (انظر loadAllExams) فالعرض هنا فوري بلا أي استعلام إضافي.
   function openTopicSubmissions(examEntry){
+    if(examEntry.submissionsLoadFailed && (!examEntry.submissions || examEntry.submissions.length===0)){
+      subPanel.innerHTML = `<div class="card">
+        <p style="color:var(--red);">تعذّر التحقق من إجابات "${esc(examEntry.title)}" (خطأ شبكة أو صلاحيات). هذا لا يعني بالضرورة عدم وجود إجابات.</p>
+        <button class="btn btn-ghost" id="retrySubs" style="padding:6px 12px;font-size:13px;">🔄 إعادة المحاولة</button>
+      </div>`;
+      document.getElementById('retrySubs').onclick = async ()=>{
+        subPanel.innerHTML = `<div class="card"><div class="loadbox"><div class="spinner"></div> جارٍ تحميل إجابات التلاميذ...</div></div>`;
+        try{
+          const subsSnap = await withTimeout(db.collection('exams').doc(examEntry.id).collection('submissions').orderBy('score','desc').get(), 15000);
+          examEntry.submissions = subsSnap.docs.map(d=>d.data());
+          examEntry.submissionsCount = examEntry.submissions.length;
+          examEntry.submissionsLoadFailed = false;
+          renderArchiveList(subjectBoxArch.value, levelBoxArch.value);
+          openTopicSubmissions(examEntry);
+        }catch(e){
+          subPanel.innerHTML = `<div class="card"><span style="color:var(--red);">فشلت المحاولة مجددًا (${esc(e.message||'')}).</span> <button class="btn btn-ghost" id="retrySubs2" style="padding:6px 12px;font-size:13px;">🔄 إعادة المحاولة</button></div>`;
+          const b2 = document.getElementById('retrySubs2');
+          if(b2) b2.onclick = ()=> openTopicSubmissions(examEntry);
+        }
+      };
+      return;
+    }
     if(!examEntry.submissions || examEntry.submissions.length===0){
       subPanel.innerHTML = `<div class="card"><p class="muted">لا توجد إجابات مرسَلة بعد لموضوع "${esc(examEntry.title)}".</p></div>`;
       return;
@@ -1263,17 +1291,28 @@ async function renderTeacherDashboard(){
     listBox.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>';
     let hadPartialError = false;
     try{
+      // مهم: تحميل بيانات الاختبار وتحميل إجاباته يشتغلان بشكل منفصل تمامًا (try/catch لكل واحد
+      // على حدة). قبل هذا التصحيح كان فشل استعلام الإجابات وحده (شبكة، صلاحيات...) كيسقط
+      // الاختبار بأكمله من كل اللوائح، رغم أن بياناته الأساسية تحمّلت بنجاح — وهذا هو سبب
+      // اختفاء اختبارات فيها إجابات فعلية من تبويبة "نتائج تلاميذي".
       const results = await withTimeout(Promise.all(mine.map(async id=>{
+        let doc;
         try{
-          const [doc, subsSnap] = await Promise.all([
-            withTimeout(db.collection('exams').doc(id).get(), 15000),
-            withTimeout(db.collection('exams').doc(id).collection('submissions').orderBy('score','desc').get(), 15000)
-          ]);
-          if(!doc.exists) return null;
-          const data = doc.data();
-          const submissions = subsSnap.docs.map(d=>d.data());
-          return { id, title: data.title||id, level: data.level||'', subject: data.subject||'بلا مادة', questionsCount: data.questions?.length||0, totalPoints: data.totalPoints||0, examData: data, submissions, submissionsCount: submissions.length };
-        }catch(e){ console.error('exam load error', id, e); hadPartialError = true; return null; }
+          doc = await withTimeout(db.collection('exams').doc(id).get(), 15000);
+        }catch(e){ console.error('exam doc load error', id, e); hadPartialError = true; return null; }
+        if(!doc.exists) return null;
+        const data = doc.data();
+        let submissions = [];
+        let submissionsLoadFailed = false;
+        try{
+          const subsSnap = await withTimeout(db.collection('exams').doc(id).collection('submissions').orderBy('score','desc').get(), 15000);
+          submissions = subsSnap.docs.map(d=>d.data());
+        }catch(e){
+          console.error('submissions load error', id, e);
+          submissionsLoadFailed = true;
+          hadPartialError = true;
+        }
+        return { id, title: data.title||id, level: data.level||'', subject: data.subject||'بلا مادة', questionsCount: data.questions?.length||0, totalPoints: data.totalPoints||0, examData: data, submissions, submissionsCount: submissions.length, submissionsLoadFailed };
       })), 30000);
       allExams = results.filter(Boolean);
       examsLoaded = true;
