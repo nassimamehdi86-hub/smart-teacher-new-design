@@ -449,6 +449,24 @@ function el(html){
   return wrap.firstChild;
 }
 function esc(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+// يوحّد الاختلافات الشائعة فكتابة العربية (الهمزات، التاء المربوطة، الألف المقصورة، التطويل،
+// الحركات، والمسافات الزائدة) باش البحث بالمادة/المستوى يخدم حتى لو كتب الأستاذ(ة) الصيغة
+// بشكل مختلف شوية عن الاختبار الأصلي (مثلاً "لغة عربية" بدل "اللغة العربية").
+function normalizeArabic(s){
+  return (s||'').toString()
+    .replace(/[\u064B-\u0652\u0670\u0640]/g, '') // حركات وتنوين وتطويل
+    .replace(/[إأآٱ]/g, 'ا')
+    .replace(/ى/g, 'ي')
+    .replace(/ة/g, 'ه')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+function textMatches(haystack, needle){
+  const h = normalizeArabic(haystack), n = normalizeArabic(needle);
+  if(!n) return true;
+  return h.includes(n) || n.includes(h);
+}
 // مواد اللغات الأجنبية (فرنسية/إنجليزية): نصوصها ونصوص أسئلتها لازم تتصوّر من اليسار لليمين (LTR)
 // حتى لو كانت الصفحة كاملة RTL، وإلا كيبان الترتيب معكوسًا فالطباعة والتصحيح.
 function isLtrSubject(subject){
@@ -1121,10 +1139,10 @@ async function renderTeacherDashboard(){
   // يبني بنية {مستوى -> مادة -> اختبارات} مرتبة، مع تطبيق تصفية المادة/المستوى محليًا (بلا أي استعلام جديد)
   // هذا هو الفرق الجوهري: التصفية تشتغل على بيانات محمّلة مسبقًا فما تتعطلش أو تعلق حتى مع بطء الشبكة.
   function groupExamsFor(list, subjFilter, levelFilter){
-    const f = (subjFilter||'').trim().toLowerCase();
-    const lv = (levelFilter||'').trim().toLowerCase();
-    let filtered = f ? list.filter(ex => ex.subject.toLowerCase().includes(f) || ex.title.toLowerCase().includes(f)) : list.slice();
-    if(lv) filtered = filtered.filter(ex => (ex.level||'').toLowerCase().includes(lv));
+    const f = (subjFilter||'').trim();
+    const lv = (levelFilter||'').trim();
+    let filtered = f ? list.filter(ex => textMatches(ex.subject, f) || textMatches(ex.title, f)) : list.slice();
+    if(lv) filtered = filtered.filter(ex => textMatches(ex.level||'', lv));
     const levelGroups = {};
     filtered.forEach(ex=>{
       const lvKey = ex.level || 'بلا مستوى';
@@ -1182,7 +1200,12 @@ async function renderTeacherDashboard(){
     if(!examsLoaded){ listBoxMine.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>'; return; }
     const {filtered, levelGroups, levelNames} = groupExamsFor(allExams, subjVal, levelVal);
     if(allExams.length===0){ listBoxMine.innerHTML = '<p class="muted">لا توجد اختبارات بعد. اضغط على "+ اختبار جديد" للبدء.</p>'; return; }
-    if(filtered.length===0){ listBoxMine.innerHTML = '<p class="muted">لا توجد اختبارات مطابقة لبحثك.</p>'; return; }
+    if(filtered.length===0){
+      listBoxMine.innerHTML = `<p class="muted">لا توجد اختبارات مطابقة لبحثك (من أصل ${allExams.length} اختبار محمّل). <a href="#" id="clearSearchMine" style="color:var(--gold-deep);font-weight:700;">امسح البحث</a> لرؤية الجميع.</p>`;
+      const cl = document.getElementById('clearSearchMine');
+      if(cl) cl.onclick = (e)=>{ e.preventDefault(); subjectBoxMine.value=''; levelBoxMine.value=''; renderMineList('',''); };
+      return;
+    }
     listBoxMine.innerHTML = renderExamGroupsHTML(levelGroups, levelNames, ex => ex.submissionsCount ? ` — ✅ ${ex.submissionsCount} إجابة` : ' — لا إجابات بعد');
     listBoxMine.querySelectorAll('[data-topic]').forEach(rowEl=>{
       rowEl.onclick = (e)=>{
@@ -1203,7 +1226,13 @@ async function renderTeacherDashboard(){
     const withSubs = allExams.filter(ex=>ex.submissionsCount>0 || ex.submissionsLoadFailed);
     const {filtered, levelGroups, levelNames} = groupExamsFor(withSubs, subjVal, levelVal);
     if(withSubs.length===0){ subPanel.innerHTML=''; listBox.innerHTML = '<p class="muted">لا توجد اختبارات أنجزها تلاميذ بعد.</p>'; return; }
-    if(filtered.length===0){ subPanel.innerHTML=''; listBox.innerHTML = '<p class="muted">لا توجد نتائج مطابقة لبحثك.</p>'; return; }
+    if(filtered.length===0){
+      subPanel.innerHTML='';
+      listBox.innerHTML = `<p class="muted">لا توجد نتائج مطابقة لبحثك (من أصل ${withSubs.length} اختبار منجز). <a href="#" id="clearSearchArch" style="color:var(--gold-deep);font-weight:700;">امسح البحث</a> لرؤية الجميع.</p>`;
+      const cl = document.getElementById('clearSearchArch');
+      if(cl) cl.onclick = (e)=>{ e.preventDefault(); subjectBoxArch.value=''; levelBoxArch.value=''; renderArchiveList('',''); };
+      return;
+    }
     listBox.innerHTML = renderExamGroupsHTML(levelGroups, levelNames, ex => ex.submissionsLoadFailed ? ' — ⚠️ تعذر التحقق من الإجابات، اضغط لإعادة المحاولة' : ` — 👥 ${ex.submissionsCount} تلميذ`);
     listBox.querySelectorAll('[data-topic]').forEach(rowEl=>{
       rowEl.onclick = (e)=>{
