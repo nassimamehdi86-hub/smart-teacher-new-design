@@ -428,7 +428,26 @@ function tryImportCfgFromUrl(){
 }
 
 /* ============================= HELPERS ============================= */
-function el(html){ const d=document.createElement('div'); d.innerHTML=html.trim(); return d.firstChild; }
+function el(html){
+  html = html.trim();
+  const m = /^<([a-zA-Z0-9-]+)/.exec(html);
+  const tag = m ? m[1].toLowerCase() : '';
+  const wrap = document.createElement('div');
+  if(tag === 'tr'){
+    wrap.innerHTML = `<table><tbody>${html}</tbody></table>`;
+    return wrap.firstChild.firstChild.firstChild;
+  }
+  if(tag === 'td' || tag === 'th'){
+    wrap.innerHTML = `<table><tbody><tr>${html}</tr></tbody></table>`;
+    return wrap.firstChild.firstChild.firstChild.firstChild;
+  }
+  if(tag === 'option'){
+    wrap.innerHTML = `<select>${html}</select>`;
+    return wrap.firstChild.firstChild;
+  }
+  wrap.innerHTML = html;
+  return wrap.firstChild;
+}
 function esc(s){ return (s??'').toString().replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 // مواد اللغات الأجنبية (فرنسية/إنجليزية): نصوصها ونصوص أسئلتها لازم تتصوّر من اليسار لليمين (LTR)
 // حتى لو كانت الصفحة كاملة RTL، وإلا كيبان الترتيب معكوسًا فالطباعة والتصحيح.
@@ -798,6 +817,7 @@ async function renderLanding(){
         </svg>
       </div>
       <div class="hero-divider">✦ ⵜ ✦</div>
+      <div class="center" style="margin-top:16px;">${installButtonHTML()}</div>
       </div>
     </div>
     <div class="card">
@@ -816,6 +836,7 @@ async function renderLanding(){
     </div>
   `;
   document.getElementById('teacherLink').onclick = (e)=>{ e.preventDefault(); go('teacherGate'); };
+  wireInstallButton('installAppBtn');
 
   if(!initFirebase()){ go('setup'); return; }
   const feed = document.getElementById('examsFeed');
@@ -1036,20 +1057,27 @@ async function renderTeacherDashboard(){
     <div class="card">
       <div class="tabbar">
         <button class="tabbtn active" data-tab="exams">اختباراتي</button>
-        <button class="tabbtn" data-tab="archive">📄 حلول تلاميذي</button>
+        <button class="tabbtn" data-tab="archive">📄 نتائج تلاميذي</button>
       </div>
 
       <div class="tabpanel active" id="tab-exams">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
+        <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
           <h3 style="margin:0;">اختباراتي</h3>
           <button class="btn btn-primary" id="newExam">+ اختبار جديد</button>
         </div>
-        <p class="muted" style="margin-top:12px;">أنشئ اختبارًا جديدًا هنا، أو انتقل لتبويبة "حلول تلاميذي" لمعاينة إجابات التلاميذ ونقطهم وتصحيحهم بصيغة PDF.</p>
+        <p class="muted" style="margin-top:10px;">جميع اختباراتك تظهر هنا. اضغط على أي اختبار لمعاينته أو الحصول على رابط مشاركته أو حذفه.</p>
+        <div class="row" style="margin-top:10px;">
+          <div class="field"><label>المادة</label>
+            <input type="text" id="subjectSearchExams" placeholder="مثلاً: الرياضيات..."></div>
+          <div class="field"><label>المستوى</label>
+            <input type="text" id="levelSearchExams" placeholder="مثلاً: السنة الأولى متوسط..."></div>
+        </div>
+        <div id="examsListMine" class="muted" style="margin-top:14px;">جارٍ التحميل...</div>
       </div>
 
       <div class="tabpanel" id="tab-archive">
-        <h3 style="margin-top:0;">📄 حلول تلاميذي</h3>
-        <p class="muted">ابحث عن الموضوع بالمادة أو المستوى، ثم اختر الموضوع لعرض لائحة التلاميذ الذين أجابوا مع نقطهم وتصحيحهم.</p>
+        <h3 style="margin-top:0;">📄 نتائج تلاميذي</h3>
+        <p class="muted">تظهر هنا حصريًا الاختبارات التي أجاب عنها تلميذ واحد على الأقل. ابحث بالمادة أو المستوى، ثم اختر الاختبار لعرض لائحة التلاميذ وأسماءهم ونقطهم وحلولهم.</p>
         <div class="row">
           <div class="field"><label>المادة</label>
             <input type="text" id="subjectSearch" placeholder="مثلاً: الرياضيات..."></div>
@@ -1073,88 +1101,26 @@ async function renderTeacherDashboard(){
     };
   });
 
+  const listBoxMine = document.getElementById('examsListMine');
   const listBox = document.getElementById('examsList');
   const subPanel = document.getElementById('submissionsPanel');
-  const searchBox = document.getElementById('subjectSearch');
-  const levelBox = document.getElementById('levelSearch');
-  attachSuggestions(levelBox, ALL_LEVELS, (val)=> renderGrouped(searchBox.value, val));
-  attachSuggestions(searchBox, STANDARD_SUBJECTS, (val)=> renderGrouped(val, levelBox.value));
 
-  if(mine.length===0){ listBox.innerHTML = 'لا توجد اختبارات بعد. اضغط على "اختبار جديد" للبدء.'; return; }
-
-  let allExams = [];
-  let examsLoaded = false;
-  try{
-    const results = await Promise.all(mine.map(async id=>{
-      try{
-        const doc = await db.collection('exams').doc(id).get();
-        if(!doc.exists) return null;
-        const data = doc.data();
-        return { id, title: data.title||id, level: data.level||'', subject: data.subject||'بلا مادة', questionsCount: data.questions?.length||0, totalPoints: data.totalPoints||0, examData: data };
-      }catch(e){ return null; }
-    }));
-    allExams = results.filter(Boolean);
-    examsLoaded = true;
-  }catch(e){
-    listBox.innerHTML = `<span style="color:var(--red);">تعذّر تحميل الاختبارات (${esc(e.message||'')}).</span>`;
+  if(mine.length===0){
+    listBoxMine.innerHTML = 'لا توجد اختبارات بعد. اضغط على "+ اختبار جديد" للبدء.';
+    listBox.innerHTML = 'لا توجد اختبارات بعد.';
     return;
   }
 
-  // يعرض لائحة التلاميذ الذين أجابوا على موضوع معيّن، مع نقطهم وأزرار فتح/تنزيل تصحيحهم PDF
-  async function openTopicSubmissions(examEntry){
-    listBox.querySelectorAll('.exam-row').forEach(r=>r.classList.remove('active-topic'));
-    const rowEl = listBox.querySelector(`[data-topic="${examEntry.id}"]`);
-    if(rowEl) rowEl.classList.add('active-topic');
-    subPanel.innerHTML = `<div class="card"><div class="loadbox"><div class="spinner"></div> جارٍ تحميل إجابات التلاميذ...</div></div>`;
-    try{
-      const snap = await db.collection('exams').doc(examEntry.id).collection('submissions').orderBy('score','desc').get();
-      if(snap.empty){
-        subPanel.innerHTML = `<div class="card"><p class="muted">لا توجد إجابات مرسَلة بعد لموضوع "${esc(examEntry.title)}".</p></div>`;
-        return;
-      }
-      subPanel.innerHTML = `
-        <div class="card">
-          <h3 style="margin-top:0;">📋 ${esc(examEntry.title)} — إجابات التلاميذ (${snap.size})</h3>
-          <table>
-            <thead><tr><th>التلميذ(ة)</th><th>النقطة</th><th>التصحيح</th></tr></thead>
-            <tbody id="subRows"></tbody>
-          </table>
-        </div>`;
-      const tbody = subPanel.querySelector('#subRows');
-      snap.docs.forEach((d,i)=>{
-        const s = d.data();
-        const cls = i===0?'rank1':i===1?'rank2':i===2?'rank3':'';
-        const tr = el(`<tr>
-          <td>${esc(s.studentName)}</td>
-          <td class="${cls}" dir="ltr">${s.score}/${s.totalPoints}</td>
-          <td>
-            <button class="btn btn-ghost" data-act="open" style="padding:6px 10px;font-size:13px;">👁️ فتح</button>
-            <button class="btn btn-gold" data-act="dl" style="padding:6px 10px;font-size:13px;">⬇️ تنزيل</button>
-          </td>
-        </tr>`);
-        tbody.appendChild(tr);
-        bindCorrectionButtons(tr, examEntry.examData, s);
-      });
-    }catch(e){
-      subPanel.innerHTML = `<div class="card"><span style="color:var(--red);">تعذّر تحميل الإجابات (${esc(e.message||'')}).</span></div>`;
-    }
-  }
+  let allExams = [];
+  let examsLoaded = false;
 
-  function renderGrouped(filterText, levelValue){
-    if(!examsLoaded){
-      listBox.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>';
-      return;
-    }
-    const f = (filterText||'').trim().toLowerCase();
-    const lv = levelValue||'';
-    let filtered = f ? allExams.filter(ex =>
-      ex.subject.toLowerCase().includes(f) || ex.title.toLowerCase().includes(f)
-    ) : allExams;
-    if(lv){ const lvf=lv.trim().toLowerCase(); filtered = filtered.filter(ex=>(ex.level||'').toLowerCase().includes(lvf)); }
-
-    subPanel.innerHTML = '';
-    if(filtered.length===0){ listBox.innerHTML = '<p class="muted">لا توجد نتائج مطابقة.</p>'; return; }
-
+  // يبني بنية {مستوى -> مادة -> اختبارات} مرتبة، مع تطبيق تصفية المادة/المستوى محليًا (بلا أي استعلام جديد)
+  // هذا هو الفرق الجوهري: التصفية تشتغل على بيانات محمّلة مسبقًا فما تتعطلش أو تعلق حتى مع بطء الشبكة.
+  function groupExamsFor(list, subjFilter, levelFilter){
+    const f = (subjFilter||'').trim().toLowerCase();
+    const lv = (levelFilter||'').trim().toLowerCase();
+    let filtered = f ? list.filter(ex => ex.subject.toLowerCase().includes(f) || ex.title.toLowerCase().includes(f)) : list.slice();
+    if(lv) filtered = filtered.filter(ex => (ex.level||'').toLowerCase().includes(lv));
     const levelGroups = {};
     filtered.forEach(ex=>{
       const lvKey = ex.level || 'بلا مستوى';
@@ -1168,8 +1134,11 @@ async function renderTeacherDashboard(){
       if(ib===-1) return -1;
       return ia-ib;
     });
+    return {filtered, levelGroups, levelNames};
+  }
 
-    listBox.innerHTML = levelNames.map(lvName=>{
+  function renderExamGroupsHTML(levelGroups, levelNames, extraBadge){
+    return levelNames.map(lvName=>{
       const groups = {};
       levelGroups[lvName].forEach(ex=>{
         if(!groups[ex.subject]) groups[ex.subject] = [];
@@ -1193,7 +1162,7 @@ async function renderTeacherDashboard(){
                   <div class="exam-ico">📘</div>
                   <div class="exam-info">
                     <div class="t">${esc(ex.title)}</div>
-                    <div class="s">${ex.questionsCount} سؤال — ${ex.totalPoints} نقطة</div>
+                    <div class="s">${ex.questionsCount} سؤال — ${ex.totalPoints} نقطة${extraBadge ? extraBadge(ex) : ''}</div>
                   </div>
                   <button class="btn btn-ghost" data-manage="${ex.id}" style="padding:8px 12px;font-size:13px;" title="رابط المشاركة والحذف">⚙️</button>
                 </div>`).join('')}
@@ -1202,9 +1171,39 @@ async function renderTeacherDashboard(){
         </div>
       `;
     }).join('');
+  }
+
+  // تبويبة "اختباراتي": تعرض كل الاختبارات بلا استثناء، والضغط على أي واحد يفتح لوحة إدارته
+  function renderMineList(subjVal, levelVal){
+    if(!examsLoaded){ listBoxMine.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>'; return; }
+    const {filtered, levelGroups, levelNames} = groupExamsFor(allExams, subjVal, levelVal);
+    if(allExams.length===0){ listBoxMine.innerHTML = '<p class="muted">لا توجد اختبارات بعد. اضغط على "+ اختبار جديد" للبدء.</p>'; return; }
+    if(filtered.length===0){ listBoxMine.innerHTML = '<p class="muted">لا توجد اختبارات مطابقة لبحثك.</p>'; return; }
+    listBoxMine.innerHTML = renderExamGroupsHTML(levelGroups, levelNames, ex => ex.submissionsCount ? ` — ✅ ${ex.submissionsCount} إجابة` : ' — لا إجابات بعد');
+    listBoxMine.querySelectorAll('[data-topic]').forEach(rowEl=>{
+      rowEl.onclick = (e)=>{
+        if(e.target.closest('[data-manage]')) return;
+        openExamPanel(rowEl.dataset.topic);
+      };
+    });
+    listBoxMine.querySelectorAll('[data-manage]').forEach(b=>{
+      b.onclick = (e)=>{ e.stopPropagation(); openExamPanel(b.dataset.manage); };
+    });
+  }
+
+  // تبويبة "نتائج تلاميذي": تعرض حصريًا الاختبارات التي لها إجابة واحدة على الأقل
+  function renderArchiveList(subjVal, levelVal){
+    if(!examsLoaded){ listBox.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>'; return; }
+    const withSubs = allExams.filter(ex=>ex.submissionsCount>0);
+    const {filtered, levelGroups, levelNames} = groupExamsFor(withSubs, subjVal, levelVal);
+    if(withSubs.length===0){ subPanel.innerHTML=''; listBox.innerHTML = '<p class="muted">لا توجد اختبارات أنجزها تلاميذ بعد.</p>'; return; }
+    if(filtered.length===0){ subPanel.innerHTML=''; listBox.innerHTML = '<p class="muted">لا توجد نتائج مطابقة لبحثك.</p>'; return; }
+    listBox.innerHTML = renderExamGroupsHTML(levelGroups, levelNames, ex => ` — 👥 ${ex.submissionsCount} تلميذ`);
     listBox.querySelectorAll('[data-topic]').forEach(rowEl=>{
       rowEl.onclick = (e)=>{
         if(e.target.closest('[data-manage]')) return;
+        listBox.querySelectorAll('.exam-row').forEach(r=>r.classList.remove('active-topic'));
+        rowEl.classList.add('active-topic');
         const ex = allExams.find(x=>x.id===rowEl.dataset.topic);
         if(ex) openTopicSubmissions(ex);
       };
@@ -1214,7 +1213,86 @@ async function renderTeacherDashboard(){
     });
   }
 
-  renderGrouped('', '');
+  // يعرض لائحة التلاميذ الذين أجابوا على موضوع معيّن، مع نقطهم وأزرار فتح/تنزيل تصحيحهم PDF
+  // الإجابات محمّلة مسبقًا مع باقي البيانات (انظر loadAllExams) فالعرض هنا فوري بلا أي استعلام إضافي.
+  function openTopicSubmissions(examEntry){
+    if(!examEntry.submissions || examEntry.submissions.length===0){
+      subPanel.innerHTML = `<div class="card"><p class="muted">لا توجد إجابات مرسَلة بعد لموضوع "${esc(examEntry.title)}".</p></div>`;
+      return;
+    }
+    subPanel.innerHTML = `
+      <div class="card">
+        <h3 style="margin-top:0;">📋 ${esc(examEntry.title)} — إجابات التلاميذ (${examEntry.submissions.length})</h3>
+        <table>
+          <thead><tr><th>التلميذ(ة)</th><th>النقطة</th><th>التصحيح</th></tr></thead>
+          <tbody id="subRows"></tbody>
+        </table>
+      </div>`;
+    const tbody = subPanel.querySelector('#subRows');
+    examEntry.submissions.forEach((s,i)=>{
+      const cls = i===0?'rank1':i===1?'rank2':i===2?'rank3':'';
+      const tr = el(`<tr>
+        <td>${esc(s.studentName)}</td>
+        <td class="${cls}" dir="ltr">${s.score}/${s.totalPoints}</td>
+        <td>
+          <button class="btn btn-ghost" data-act="open" style="padding:6px 10px;font-size:13px;">👁️ فتح</button>
+          <button class="btn btn-gold" data-act="dl" style="padding:6px 10px;font-size:13px;">⬇️ تنزيل</button>
+        </td>
+      </tr>`);
+      tbody.appendChild(tr);
+      bindCorrectionButtons(tr, examEntry.examData, s);
+    });
+  }
+
+  const subjectBoxMine = document.getElementById('subjectSearchExams');
+  const levelBoxMine = document.getElementById('levelSearchExams');
+  attachSuggestions(levelBoxMine, ALL_LEVELS, (val)=> renderMineList(subjectBoxMine.value, val));
+  attachSuggestions(subjectBoxMine, STANDARD_SUBJECTS, (val)=> renderMineList(val, levelBoxMine.value));
+
+  const subjectBoxArch = document.getElementById('subjectSearch');
+  const levelBoxArch = document.getElementById('levelSearch');
+  attachSuggestions(levelBoxArch, ALL_LEVELS, (val)=> renderArchiveList(subjectBoxArch.value, val));
+  attachSuggestions(subjectBoxArch, STANDARD_SUBJECTS, (val)=> renderArchiveList(val, levelBoxArch.value));
+
+  // تحميل كل الاختبارات وإجاباتها دفعة واحدة، بمهلة زمنية على كل استعلام حتى لا يبقى العرض
+  // عالقًا فحالة "جارٍ التحميل..." إلى الأبد بسبب بطء أو انقطاع الشبكة. خطأ في اختبار واحد
+  // ما كيوقفش تحميل الباقي (try/catch لكل اختبار على حدة).
+  async function loadAllExams(){
+    examsLoaded = false;
+    listBoxMine.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>';
+    listBox.innerHTML = '<div class="loadbox"><div class="spinner"></div> جارٍ تحميل الاختبارات...</div>';
+    let hadPartialError = false;
+    try{
+      const results = await withTimeout(Promise.all(mine.map(async id=>{
+        try{
+          const [doc, subsSnap] = await Promise.all([
+            withTimeout(db.collection('exams').doc(id).get(), 15000),
+            withTimeout(db.collection('exams').doc(id).collection('submissions').orderBy('score','desc').get(), 15000)
+          ]);
+          if(!doc.exists) return null;
+          const data = doc.data();
+          const submissions = subsSnap.docs.map(d=>d.data());
+          return { id, title: data.title||id, level: data.level||'', subject: data.subject||'بلا مادة', questionsCount: data.questions?.length||0, totalPoints: data.totalPoints||0, examData: data, submissions, submissionsCount: submissions.length };
+        }catch(e){ console.error('exam load error', id, e); hadPartialError = true; return null; }
+      })), 30000);
+      allExams = results.filter(Boolean);
+      examsLoaded = true;
+      if(hadPartialError) toast('تعذّر تحميل بعض الاختبارات، تحقق من الاتصال بالإنترنت.');
+    }catch(e){
+      console.error(e);
+      const retryHtml = `<div><span style="color:var(--red);">تعذّر تحميل الاختبارات (${esc(e.message||'')}).</span> <button class="btn btn-ghost" id="retryLoadExams" style="margin-right:8px;padding:6px 12px;font-size:13px;">🔄 إعادة المحاولة</button></div>`;
+      listBoxMine.innerHTML = retryHtml;
+      listBox.innerHTML = '';
+      subPanel.innerHTML = '';
+      const retryBtn = document.getElementById('retryLoadExams');
+      if(retryBtn) retryBtn.onclick = loadAllExams;
+      return;
+    }
+    renderMineList(subjectBoxMine.value, levelBoxMine.value);
+    renderArchiveList(subjectBoxArch.value, levelBoxArch.value);
+  }
+
+  loadAllExams();
 }
 
 // يحذف اختبارًا مع كل إجاباته المرسلة (لا يمكن التراجع عن هذا الإجراء)
@@ -2572,11 +2650,55 @@ function render(){
   }
 }
 
-/* ============================= PWA / SERVICE WORKER ============================= */
+/* ============================= PWA / SERVICE WORKER (تحديث تلقائي) ============================= */
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
-    navigator.serviceWorker.register('service-worker.js').catch(()=>{});
+    navigator.serviceWorker.register('service-worker.js').then(reg=>{
+      // كل ما فتحنا الصفحة، نفحصو يدويًا واش كاين تحديث جديد (بجانب الفحص التلقائي للمتصفح)
+      reg.update().catch(()=>{});
+      // نفحصو دوريًا (كل 60 ثانية) طالما الصفحة مفتوحة، باش التحديث يوصل بسرعة بلا حاجة التلميذ يسكر التطبيق
+      setInterval(()=>{ reg.update().catch(()=>{}); }, 60000);
+    }).catch(()=>{});
   });
+  // كي يفعّل Service Worker جديد (نسخة محدثة)، نعاودو تحميل الصفحة تلقائيًا مرة وحدة باش يبان آخر تحديث فورًا
+  let swRefreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+    if(swRefreshing) return;
+    swRefreshing = true;
+    window.location.reload();
+  });
+}
+
+/* ============================= PWA / زر تثبيت التطبيق ============================= */
+let deferredInstallPrompt = null;
+const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+window.addEventListener('beforeinstallprompt', (e)=>{
+  e.preventDefault();
+  deferredInstallPrompt = e;
+  document.querySelectorAll('.install-app-btn').forEach(b=> b.style.display = 'inline-flex');
+});
+window.addEventListener('appinstalled', ()=>{
+  deferredInstallPrompt = null;
+  document.querySelectorAll('.install-app-btn').forEach(b=> b.style.display = 'none');
+  toast('تم تثبيت التطبيق ✅');
+});
+async function triggerInstallPrompt(){
+  if(!deferredInstallPrompt) return;
+  deferredInstallPrompt.prompt();
+  await deferredInstallPrompt.userChoice;
+  deferredInstallPrompt = null;
+  document.querySelectorAll('.install-app-btn').forEach(b=> b.style.display = 'none');
+}
+// يبني زر التثبيت، ويبقى مخفيًا تلقائيًا إلا كان التطبيق مثبت أصلاً أو المتصفح ما كيدعمش الميزة
+function installButtonHTML(){
+  if(isStandalone) return '';
+  return `<button class="btn btn-gold install-app-btn" id="installAppBtn" style="display:none;">📲 تثبيت التطبيق</button>`;
+}
+function wireInstallButton(id){
+  const btn = document.getElementById(id);
+  if(!btn) return;
+  if(deferredInstallPrompt) btn.style.display = 'inline-flex';
+  btn.onclick = triggerInstallPrompt;
 }
 
 /* ============================= BOOT ============================= */

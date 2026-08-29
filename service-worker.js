@@ -1,6 +1,8 @@
 // Smart Teacher — المعلم الذكي
 // Service Worker: network-first (باش الأستاذ/التلميذ يشوفو آخر نسخة ديما إيلا كان نت)
-const CACHE_VERSION = 'smart-teacher-v1';
+// + تحديث تلقائي: أي تعديل فهاذ الملف (بتغيير CACHE_VERSION) كيخلي المتصفح يكتشف نسخة جديدة
+// وينشطها فورًا (skipWaiting + clients.claim)، والصفحة كتعاود التحميل تلقائيًا بفضل الكود فـ index.html.
+const CACHE_VERSION = 'smart-teacher-v2';
 const CORE_ASSETS = [
   './',
   './index.html',
@@ -23,6 +25,13 @@ self.addEventListener('activate', (event) => {
     )
   );
   self.clients.claim();
+});
+
+// دعم إضافي: إلا بعتت الصفحة رسالة SKIP_WAITING (احتياطًا)، ننشط النسخة الجديدة فورًا
+self.addEventListener('message', (event) => {
+  if (event.data && event.data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
 });
 
 self.addEventListener('fetch', (event) => {
